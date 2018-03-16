@@ -1,0 +1,237 @@
+
+import os, sys
+sys.path.append(os.getcwd())
+
+import random
+import time
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import tensorflow as tf
+import sklearn.datasets
+
+try:
+  image_summary = tf.image_summary
+  scalar_summary = tf.scalar_summary
+  histogram_summary = tf.histogram_summary
+  merge_summary = tf.merge_summary
+  SummaryWriter = tf.train.SummaryWriter
+except:
+  image_summary = tf.summary.image
+  scalar_summary = tf.summary.scalar
+  histogram_summary = tf.summary.histogram
+  merge_summary = tf.summary.merge
+  SummaryWriter = tf.summary.FileWriter
+
+
+MODE = 'wgan-gp' # wgan or wgan-gp or VKL
+DATASET = '25gaussians' # 8gaussians, 25gaussians, swissroll
+DIM = 512 # Model dimensionality
+FIXED_GENERATOR = False # whether to hold the generator fixed at real data plus
+                        # Gaussian noise, as in the plots in the paper
+LAMBDA = 10 # Smaller lambda makes things faster for toy tasks, but isn't
+            # necessary if you increase CRITIC_ITERS enough
+CRITIC_ITERS = 5 # How many critic iterations per generator iteration
+BATCH_SIZE = 256 # Batch size
+ITERS = 100000 # how many generator iterations to train for
+
+def linear(input_, output_size, scope=None, stddev=0.02, bias_start=0.0, with_w=False):
+  shape = input_.get_shape().as_list()
+
+  with tf.variable_scope(scope or "Linear"):
+    matrix = tf.get_variable("Matrix", [shape[1], output_size], tf.float32,
+                 tf.random_normal_initializer(stddev=stddev))
+    bias = tf.get_variable("bias", [output_size],
+      initializer=tf.constant_initializer(bias_start))
+    if with_w:
+      return tf.matmul(input_, matrix) + bias, matrix, bias
+    else:
+      return tf.matmul(input_, matrix) + bias
+
+def Generator(n_sample,real_data):
+    if FIXED_GENERATOR:
+        return tf.add(real_data,tf.random_normal(tf.shape(real_data)))
+    else:
+        with  tf.variable_scope("generator") as scope:
+            noise = tf.random_normal([n_sample, 1])
+            h1 = tf.nn.relu(linear(noise, DIM, 'g_h1'))
+            h2 = tf.nn.relu(linear(h1, DIM, 'g_h2'))
+            h3 = tf.nn.relu(linear(h2, DIM, 'g_h3'))
+            output = linear(h3, 2, 'g_h4')
+            return output
+
+def Discriminator(inputs,reuse=False):
+    with tf.variable_scope("discriminator") as scope:
+        if reuse:
+            scope.reuse_variables()
+
+        h1=tf.nn.relu(linear(inputs,DIM,'d_h1'))
+        h2=tf.nn.relu(linear(h1, DIM, 'd_h2'))
+        h3=tf.nn.relu(linear(h2,DIM,'d_h3'))
+        #print(h3.get_shape().as_list()[1])
+        output=linear(h3,1,'d_h4')
+
+
+        return h1,h2,h3,tf.reshape(output,[-1])
+
+real_data=tf.placeholder(tf.float32,shape=[None,2])
+fake_data=Generator(BATCH_SIZE,real_data)
+
+d_h1_real,d_h2_real,d_h3_real,d_real=Discriminator(real_data)
+d_h1_fake,d_h2_fake,d_h3_fake,d_fake=Discriminator(fake_data,reuse=True)
+
+d_loss_real=tf.reduce_mean(d_real)
+d_loss_fake=tf.reduce_mean(d_fake)
+
+d_loss=d_loss_fake-d_loss_real
+g_loss=-d_loss_fake
+
+h1_gradient_real=tf.reduce_mean((tf.reduce_sum(tf.square(tf.gradients(d_real,d_h1_real)),axis=1)-1)**2)
+h2_gradient_real=tf.reduce_mean((tf.reduce_sum(tf.square(tf.gradients(d_real,d_h2_real)),axis=1)-1)**2)
+h3_gradient_real=tf.reduce_mean((tf.reduce_sum(tf.square(tf.gradients(d_real,d_h3_real)),axis=1)-1)**2)
+
+alpha = tf.random_uniform(shape=[BATCH_SIZE, 1], minval=0, maxval=1)
+interpolates = alpha * real_data + ((1 - alpha) * fake_data)
+d_inter = Discriminator(interpolates, reuse=True)
+gradients = tf.gradients(d_inter, interpolates)
+slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), axis=1))
+gradient_penalty = tf.reduce_mean((slopes - 1) ** 2)
+
+s = 1/tf.sqrt(tf.reduce_sum(tf.square(gradients)))
+slope_sum=scalar_summary("d_slope",s)
+
+if MODE=='wgan-gp':
+
+    d_loss+=LAMBDA*gradient_penalty
+    print("wgan-gp")
+
+if MODE=='VKL':
+    d_loss+=tf.maximum(tf.square(d_loss_fake)-1,0)+tf.maximum(tf.square(d_loss_real)-1,0)
+
+
+t_vars = tf.trainable_variables()
+d_vars = [var for var in t_vars if 'd_' in var.name]
+g_vars = [var for var in t_vars if 'g_' in var.name]
+
+d_optim=tf.train.AdamOptimizer(learning_rate=1e-4,beta1=0.9,beta2=0.9).minimize(d_loss,var_list=d_vars)
+g_optim=tf.train.AdamOptimizer(learning_rate=1e-4,beta1=0.9,beta2=0.9).minimize(g_loss,var_list=g_vars)
+frame_index=[0]
+def generate_image(true_dist):
+    """
+    Generates and saves a plot of the true distribution, the generator, and the
+    critic.
+    """
+    N_POINTS = 128
+    RANGE = 3
+
+    points = np.zeros((N_POINTS, N_POINTS, 2), dtype='float32')
+    points[:,:,0] = np.linspace(-RANGE, RANGE, N_POINTS)[:,None]
+    points[:,:,1] = np.linspace(-RANGE, RANGE, N_POINTS)[None,:]
+    points = points.reshape((-1,2))
+    samples, disc_map = session.run(
+        [fake_data, d_real],
+        feed_dict={real_data:points}
+    )
+
+
+    plt.clf()
+
+    x = y = np.linspace(-RANGE, RANGE, N_POINTS)
+    plt.contour(x,y,disc_map.reshape((len(x), len(y))).transpose())
+
+    plt.scatter(true_dist[:, 0], true_dist[:, 1], c='orange',  marker='+')
+    plt.scatter(samples[:, 0],    samples[:, 1],    c='green', marker='+')
+
+    plt.savefig('frame'+str(frame_index[0])+'.jpg')
+    frame_index[0] += 1
+
+
+def inf_train_gen():
+    if DATASET == '25gaussians':
+
+        dataset = []
+        for i in range(int(100000 / 25)):
+            for x in range(-2, 3):
+                for y in range(-2, 3):
+                    point = np.random.randn(2) * 0.05
+                    point[0] += 2 * x
+                    point[1] += 2 * y
+                    dataset.append(point)
+        dataset = np.array(dataset, dtype='float32')
+        np.random.shuffle(dataset)
+        dataset /= 2.828  # stdev
+        while True:
+            for i in range(int(len(dataset) / BATCH_SIZE)):
+                yield dataset[i * BATCH_SIZE:(i + 1) * BATCH_SIZE]
+
+    elif DATASET == 'swissroll':
+
+        while True:
+            data = sklearn.datasets.make_swiss_roll(
+                n_samples=BATCH_SIZE,
+                noise=0.25
+            )[0]
+            data = data.astype('float32')[:, [0, 2]]
+            data /= 7.5  # stdev plus a little
+            yield data
+
+    elif DATASET == '8gaussians':
+
+        scale = 2.
+        centers = [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1. / np.sqrt(2), 1. / np.sqrt(2)),
+            (1. / np.sqrt(2), -1. / np.sqrt(2)),
+            (-1. / np.sqrt(2), 1. / np.sqrt(2)),
+            (-1. / np.sqrt(2), -1. / np.sqrt(2))
+        ]
+        centers = [(scale * x, scale * y) for x, y in centers]
+        while True:
+            dataset = []
+            for i in range(BATCH_SIZE):
+                point = np.random.randn(2) * .02
+                center = random.choice(centers)
+                point[0] += center[0]
+                point[1] += center[1]
+                dataset.append(point)
+            dataset = np.array(dataset, dtype='float32')
+            dataset /= 1.414  # stdev
+            yield dataset
+
+run_config = tf.ConfigProto()
+run_config.gpu_options.allow_growth=True
+with tf.Session(config=run_config) as session:
+    tf.global_variables_initializer().run()
+    gen=inf_train_gen()
+    writer = SummaryWriter("./logs_vkl")
+
+    for iteration in range(ITERS):
+        if iteration>0:
+            _g_loss,_=session.run([g_loss,g_optim])
+
+        for i in range(CRITIC_ITERS):
+            _data=gen.__next__()
+            _d_loss, _=session.run([d_loss,d_optim],feed_dict={real_data:_data})
+
+
+
+        if iteration%100==99:
+            generate_image(_data)
+            _slope, _slope_sum = session.run([s, slope_sum], feed_dict={real_data: _data})
+            print("Epoch: [%2d] ,d_loss:%.8f,g_loss:%.8f,slope:%.8f" \
+                  % (iteration, _d_loss, _g_loss, _slope))
+            writer.add_summary(_slope_sum, iteration)
+        if iteration==ITERS-1:
+            h1_g, h2_g, h3_g= session.run([h1_gradient_real,h2_gradient_real,h2_gradient_real],feed_dict={real_data:_data})
+            print("gradient:h1:%.8f,h2:%.8f,h3:%.8f"%(h1_g,h2_g,h3_g))
+
+
+
+
+
+
