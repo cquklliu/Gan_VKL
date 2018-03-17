@@ -5,8 +5,11 @@ implementation of paper"Varying k-Lipschitz Constraint for Generative Adversaria
 Prerequisites
 
 Python 2.7 or Python 3.3+
+
 Tensorflow 0.12.1
+
 SciPy
+
 pillow
 
 
